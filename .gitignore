@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+build/
+dist/
+output/
+temp_images/
+*.spec
+~$*
+.venv/
