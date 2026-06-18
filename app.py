@@ -67,6 +67,7 @@ TEMP_DIR = Path(tempfile.gettempdir()) / "ExcelPPTGenerator" / "temp_images"
 class RowRecord:
     excel_row: int
     values: Dict[str, str]
+    rich_values: Dict[str, List[Tuple[str, bool]]]
     image_path: Optional[Path] = None
 
     @property
@@ -80,6 +81,29 @@ def normalize_value(value) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value)
+
+
+def cell_rich_parts(cell) -> List[Tuple[str, bool]]:
+    value = cell.value
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [(value, bool(cell.font.bold))]
+    parts: List[Tuple[str, bool]] = []
+    try:
+        for item in value:
+            text = getattr(item, "text", item)
+            font = getattr(item, "font", None)
+            bold = bool(getattr(font, "b", False) or getattr(font, "bold", False))
+            if text:
+                parts.append((str(text), bold))
+    except TypeError:
+        parts.append((str(value), bool(cell.font.bold)))
+    return parts
+
+
+def rich_parts_to_text(parts: List[Tuple[str, bool]]) -> str:
+    return "".join(text for text, _ in parts)
 
 
 def display_path(path: Path) -> str:
@@ -142,7 +166,7 @@ def extract_excel_rows_and_images(
     sheet_name: str,
     temp_dir: Path,
 ) -> Tuple[List[str], List[RowRecord], Dict[str, int]]:
-    wb = load_workbook(excel_path, data_only=True)
+    wb = load_workbook(excel_path, data_only=False, rich_text=True)
     if sheet_name not in wb.sheetnames:
         raise ValueError(f"工作表不存在: {sheet_name}")
 
@@ -174,15 +198,19 @@ def extract_excel_rows_and_images(
     max_row = ws.max_row or 1
     for row_idx in range(2, max_row + 1):
         values: Dict[str, str] = {}
+        rich_values: Dict[str, List[Tuple[str, bool]]] = {}
         has_any = False
         for col_idx, header in enumerate(headers, start=1):
-            cell_value = normalize_value(ws.cell(row=row_idx, column=col_idx).value)
+            cell = ws.cell(row=row_idx, column=col_idx)
+            parts = cell_rich_parts(cell)
+            cell_value = rich_parts_to_text(parts) if parts else normalize_value(cell.value)
             values[header] = cell_value
+            rich_values[header] = parts or [(cell_value, bool(cell.font.bold))]
             if cell_value:
                 has_any = True
         if not has_any and row_idx not in image_by_row:
             continue
-        records.append(RowRecord(excel_row=row_idx, values=values, image_path=image_by_row.get(row_idx)))
+        records.append(RowRecord(excel_row=row_idx, values=values, rich_values=rich_values, image_path=image_by_row.get(row_idx)))
 
     stats = {
         "rows": len(records),
@@ -375,6 +403,50 @@ def replace_shape_text(shape, text: str) -> None:
             run.text = ""
 
 
+def copy_font_style(target_run, source_run) -> None:
+    target_run.font.name = source_run.font.name
+    target_run.font.size = source_run.font.size
+    target_run.font.italic = source_run.font.italic
+    try:
+        if source_run.font.color and source_run.font.color.rgb:
+            target_run.font.color.rgb = source_run.font.color.rgb
+    except Exception:
+        pass
+
+
+def replace_shape_rich_text(shape, parts: List[Tuple[str, bool]]) -> None:
+    if not hasattr(shape, "text_frame"):
+        return
+    text_frame = shape.text_frame
+    paragraphs = list(text_frame.paragraphs)
+    if not paragraphs:
+        replace_shape_text(shape, rich_parts_to_text(parts))
+        return
+
+    template_run = None
+    for paragraph in paragraphs:
+        if paragraph.runs:
+            template_run = paragraph.runs[0]
+            break
+
+    text_frame.clear()
+    paragraph = text_frame.paragraphs[0]
+    if template_run is not None:
+        paragraph.alignment = paragraphs[0].alignment
+
+    for text, bold in parts or [("", False)]:
+        chunks = str(text).split("\n")
+        for idx, chunk in enumerate(chunks):
+            if idx > 0:
+                paragraph = text_frame.add_paragraph()
+            if chunk:
+                run = paragraph.add_run()
+                if template_run is not None:
+                    copy_font_style(run, template_run)
+                run.font.bold = bool(bold)
+                run.text = chunk
+
+
 def shape_plain_text(shape) -> str:
     if not hasattr(shape, "text"):
         return ""
@@ -425,7 +497,10 @@ def replace_copied_slide_content(slide, record: RowRecord) -> None:
     for shape in list(slide.shapes):
         field = classify_template_shape(shape)
         if field:
-            replace_shape_text(shape, record.values.get(field, ""))
+            if field == "商品规格":
+                replace_shape_rich_text(shape, record.rich_values.get(field, []))
+            else:
+                replace_shape_text(shape, record.values.get(field, ""))
 
     picture_shape = find_template_picture(slide)
     if picture_shape is None:
