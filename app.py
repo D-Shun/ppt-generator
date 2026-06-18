@@ -4,6 +4,7 @@ import argparse
 import os
 import shutil
 import sys
+import tempfile
 import traceback
 from copy import deepcopy
 from dataclasses import dataclass
@@ -44,12 +45,22 @@ from PyQt5.QtWidgets import (
 )
 
 
-ROOT = Path.cwd()
+def app_root() -> Path:
+    cwd = Path.cwd()
+    try:
+        if os.access(str(cwd), os.W_OK):
+            return cwd
+    except Exception:
+        pass
+    return Path.home() / "Documents" / "ExcelPPTGenerator"
+
+
+ROOT = app_root()
 DEFAULT_EXCEL = next((p for p in ROOT.glob("*.xlsx") if not p.name.startswith("~$")), None)
 DEFAULT_PPT = next(ROOT.glob("*.pptx"), None)
 DEFAULT_OUTPUT = ROOT / "output" / "测试生成结果.pptx"
 DEFAULT_OUTPUT_DIR = ROOT / "output"
-TEMP_DIR = ROOT / "temp_images"
+TEMP_DIR = Path(tempfile.gettempdir()) / "ExcelPPTGenerator" / "temp_images"
 
 
 @dataclass
